@@ -108,7 +108,9 @@ export class Ring {
         door.timeInSpoke = 0;
         door.ticksFired = 0;
         door.lidded = false;
-        continue;
+        // Don't continue — fall through so the FIRST pull on a spoke
+        // fires this same frame. Subsequent layer pulls remain time-gated
+        // by tickInterval below.
       }
 
       door.timeInSpoke += dt;

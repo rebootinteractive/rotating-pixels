@@ -56,9 +56,11 @@ export class Disk {
       Disk.sharedGeometry = new THREE.SphereGeometry(1, 18, 14);
     }
 
-    // Build meshes
+    // Build meshes. Layer 0 is the OUTERMOST layer (largest radius);
+    // layer (layers-1) is the innermost. Door beams enter from outside,
+    // so layer 0 must be the radially-largest one.
     for (let l = 0; l < layers; l++) {
-      const r = innerRadius + l * layerSpacing;
+      const r = outerRadius - l * layerSpacing;
       for (let s = 0; s < spokes; s++) {
         const idx = l * spokes + s;
         const color = this.cells[idx];
@@ -87,9 +89,10 @@ export class Disk {
     return Math.round((a / tau) * this.spokes) % this.spokes;
   }
 
-  /** World position of a (layer, spoke) cell. */
+  /** World position of a (layer, spoke) cell. Layer 0 is outermost. */
   cellWorldPosition(layer: number, spoke: number, target: THREE.Vector3): THREE.Vector3 {
-    const r = this.innerRadius + layer * (this.outerRadius - this.innerRadius) / Math.max(1, this.layers - 1);
+    const spacing = this.layers <= 1 ? 0 : (this.outerRadius - this.innerRadius) / (this.layers - 1);
+    const r = this.outerRadius - layer * spacing;
     const a = this.spokeAngle(spoke);
     return target.set(Math.cos(a) * r, Math.sin(a) * r, 0);
   }

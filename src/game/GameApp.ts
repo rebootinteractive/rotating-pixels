@@ -12,9 +12,10 @@ export interface GameAppOptions {
   onRestart: () => void;
 }
 
-/** Time (seconds) a door must remain over a spoke before the FIRST pull. */
-const FIRST_TICK_DELAY = 0.18;
-/** Time between successive pulls within the same dwell. */
+/** Time (seconds) before the FIRST pull on a spoke. Zero = pull on contact;
+ *  this is what makes a fast flick still always peel the outer layer. */
+const FIRST_TICK_DELAY = 0;
+/** Time between successive pulls within the same dwell — gates layer 2, 3, ... */
 const TICK_INTERVAL = 0.18;
 
 export class GameApp {
