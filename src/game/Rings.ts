@@ -129,14 +129,18 @@ export class Ring {
         if (cellColor === door.color) {
           const result = disk.extract(layer, spoke);
           if (result) {
-            // Eject direction: radially outward from disk center, through the door.
+            // Spawn the ball at the door's outer position, not the disk cell —
+            // this avoids visually clipping through the ring on the way out.
             const ejectAngle = worldAngle;
-            const ejectDir = new THREE.Vector3(Math.cos(ejectAngle), Math.sin(ejectAngle), 0);
+            const cosA = Math.cos(ejectAngle);
+            const sinA = Math.sin(ejectAngle);
+            const spawnPos = new THREE.Vector3(cosA * (this.radius + this.thickness * 1.4), sinA * (this.radius + this.thickness * 1.4), 0);
+            const ejectDir = new THREE.Vector3(cosA, sinA, 0);
             out.push({
               color: result.color,
               layer,
               spoke,
-              worldPos: result.worldPos,
+              worldPos: spawnPos,
               mesh: result.mesh,
               ejectDir,
             });
