@@ -91,7 +91,8 @@ export class MainMenu {
     meta.className = 'meta';
     const ringCount = level.rings.length;
     const doorCount = level.rings.reduce((sum, r) => sum + r.doors.length, 0);
-    const pixelCount = level.disk.filter((c) => c !== null).length;
+    let pixelCount = 0;
+    for (const row of level.disk) for (const c of row) if (c !== null) pixelCount++;
     meta.textContent = `${ringCount} ring${ringCount === 1 ? '' : 's'} · ${doorCount} door${doorCount === 1 ? '' : 's'} · ${pixelCount} pixels · cap ${level.floorCapacity}`;
     left.appendChild(name);
     left.appendChild(meta);

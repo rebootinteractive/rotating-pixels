@@ -1,6 +1,7 @@
 import type { ColorKey } from './colors';
 import type { DepthBias, EditorParams, PerColorParams } from './types';
 import { CONTAINER_SLOTS } from './types';
+import { angleToSpokeIndex, spokeAngle, spokesPerLayer } from './diskGeometry';
 
 /** Mulberry32 — small deterministic PRNG. */
 function makeRng(seed: number): () => number {
@@ -23,19 +24,14 @@ export function totalPixelsFromParams(params: EditorParams): number {
   return n;
 }
 
-/** Recommend a layer count for given spokes + total pixels. */
-export function recommendedLayers(spokes: number, totalPixels: number): number {
-  return Math.max(1, Math.ceil(totalPixels / spokes));
-}
-
-interface Cell {
+interface CellRef {
   layer: number;
-  spoke: number;
-  depth: number; // 0 = outermost layer, 1 = innermost
+  indexInLayer: number;
+  /** 0 = outermost, 1 = innermost. */
+  depth: number;
 }
 
 function depthQualifies(depth: number, bias: DepthBias): number {
-  // Returns a weight 0..1 — high if cell matches bias preference.
   if (bias === 'outer') {
     if (depth <= 0.4) return 1;
     if (depth <= 0.7) return 0.3;
@@ -46,42 +42,69 @@ function depthQualifies(depth: number, bias: DepthBias): number {
     if (depth >= 0.3) return 0.3;
     return 0.05;
   }
-  return 1; // mixed
+  return 1;
 }
 
-function neighborIndices(layer: number, spoke: number, layers: number, spokes: number): number[] {
-  const out: number[] = [];
-  if (layer > 0) out.push((layer - 1) * spokes + spoke);
-  if (layer < layers - 1) out.push((layer + 1) * spokes + spoke);
-  out.push(layer * spokes + ((spoke - 1 + spokes) % spokes));
-  out.push(layer * spokes + ((spoke + 1) % spokes));
+function neighborsOf(
+  layer: number,
+  idx: number,
+  layerSpokes: number[]
+): { layer: number; indexInLayer: number }[] {
+  const out: { layer: number; indexInLayer: number }[] = [];
+  const N = layerSpokes[layer];
+  if (N <= 0) return out;
+  // Same-layer wrap-around neighbors
+  out.push({ layer, indexInLayer: (idx - 1 + N) % N });
+  out.push({ layer, indexInLayer: (idx + 1) % N });
+  // Layer above (outer)
+  if (layer > 0) {
+    const N2 = layerSpokes[layer - 1];
+    if (N2 > 0) {
+      const angle = spokeAngle(layer, idx, N);
+      const i = angleToSpokeIndex(angle - spokeAngle(layer - 1, 0, N2), N2);
+      out.push({ layer: layer - 1, indexInLayer: i });
+    }
+  }
+  // Layer below (inner)
+  if (layer < layerSpokes.length - 1) {
+    const N2 = layerSpokes[layer + 1];
+    if (N2 > 0) {
+      const angle = spokeAngle(layer, idx, N);
+      const i = angleToSpokeIndex(angle - spokeAngle(layer + 1, 0, N2), N2);
+      out.push({ layer: layer + 1, indexInLayer: i });
+    }
+  }
   return out;
 }
 
 /**
- * Generate a disk[] array (`(ColorKey | null)[]` of length spokes*layers)
- * from per-color parameters. Empty cells (`null`) appear only when
- * total pixel count is less than spokes*layers.
+ * Generate per-layer cell colors from designer parameters.
+ * Returns disk[layer][indexInLayer] — same shape used by LevelData.
  */
 export function generateDisk(
-  spokes: number,
+  outerSpokes: number,
   layers: number,
   params: EditorParams
-): (ColorKey | null)[] {
-  const total = spokes * layers;
-  const disk: (ColorKey | null)[] = new Array(total).fill(null);
-  const rng = makeRng(params.seed || 1);
+): (ColorKey | null)[][] {
+  const layerSpokes: number[] = [];
+  for (let L = 0; L < layers; L++) layerSpokes.push(spokesPerLayer(outerSpokes, L));
 
-  // Build cells with depth metadata.
-  const cells: Cell[] = [];
-  for (let l = 0; l < layers; l++) {
-    const depth = layers <= 1 ? 0 : l / (layers - 1);
-    for (let s = 0; s < spokes; s++) {
-      cells.push({ layer: l, spoke: s, depth });
+  // Allocate result array
+  const result: (ColorKey | null)[][] = layerSpokes.map((N) => new Array<ColorKey | null>(N).fill(null));
+
+  // Flat list of cell refs with depth info
+  const allCells: CellRef[] = [];
+  for (let L = 0; L < layers; L++) {
+    const N = layerSpokes[L];
+    const depth = layers <= 1 ? 0 : L / (layers - 1);
+    for (let i = 0; i < N; i++) {
+      allCells.push({ layer: L, indexInLayer: i, depth });
     }
   }
 
-  // Stable order to place colors (descending pixel count → big colors first).
+  const rng = makeRng(params.seed || 1);
+
+  // Sort colors descending by pixel count (place big colors first).
   const colorOrder: { color: ColorKey; params: PerColorParams; count: number }[] = [];
   for (const k of Object.keys(params.perColor) as ColorKey[]) {
     const p = params.perColor[k];
@@ -90,85 +113,84 @@ export function generateDisk(
   }
   colorOrder.sort((a, b) => b.count - a.count);
 
-  // For each color: place into N patches (N depends on clumpiness) that grow
-  // BFS-style across (layer ±1, spoke ±1) neighbors, biased to preferred depth.
+  const isOccupied = (l: number, i: number) => result[l][i] !== null;
+
   for (const { color, params: p, count } of colorOrder) {
     if (count <= 0) continue;
     const clump = Math.max(0, Math.min(1, p.clumpiness));
-    // Patch count: 1 (clump=1) … count (clump=0)
     const patches = Math.max(1, Math.round(1 + (1 - clump) * (count - 1)));
     const patchCount = Math.min(patches, count);
-    // Per-patch budgets (distribute remainder)
     const base = Math.floor(count / patchCount);
     const rem = count - base * patchCount;
     const budgets: number[] = [];
     for (let i = 0; i < patchCount; i++) budgets.push(base + (i < rem ? 1 : 0));
 
-    for (const budget of budgets) {
+    for (let bi = 0; bi < budgets.length; bi++) {
+      const budget = budgets[bi];
       let placed = 0;
+
       // Pick a seed cell biased by depth preference.
-      const candidates: { idx: number; w: number }[] = [];
-      for (let i = 0; i < total; i++) {
-        if (disk[i] !== null) continue;
-        const w = depthQualifies(cells[i].depth, p.depthBias);
-        candidates.push({ idx: i, w });
+      const candidates: { ref: CellRef; w: number }[] = [];
+      for (const c of allCells) {
+        if (isOccupied(c.layer, c.indexInLayer)) continue;
+        const w = depthQualifies(c.depth, p.depthBias);
+        candidates.push({ ref: c, w });
       }
       if (candidates.length === 0) break;
-      const seedIdx = weightedPick(candidates, rng);
-      if (seedIdx === -1) break;
+      const seed = weightedPick(candidates, rng);
+      if (!seed) break;
 
-      disk[seedIdx] = color;
+      result[seed.layer][seed.indexInLayer] = color;
       placed++;
 
       if (placed >= budget) continue;
 
-      // BFS expansion from the seed.
-      const frontier: number[] = neighborIndices(
-        cells[seedIdx].layer,
-        cells[seedIdx].spoke,
-        layers,
-        spokes
-      ).filter((i) => disk[i] === null);
+      // BFS expansion
+      const frontier = neighborsOf(seed.layer, seed.indexInLayer, layerSpokes).filter(
+        (n) => !isOccupied(n.layer, n.indexInLayer)
+      );
       shuffleInPlace(frontier, rng);
 
       while (placed < budget && frontier.length > 0) {
         const next = frontier.shift()!;
-        if (disk[next] !== null) continue;
-        disk[next] = color;
+        if (isOccupied(next.layer, next.indexInLayer)) continue;
+        result[next.layer][next.indexInLayer] = color;
         placed++;
-        // Append new neighbors of `next` to frontier
-        const nb = neighborIndices(cells[next].layer, cells[next].spoke, layers, spokes);
+        const nb = neighborsOf(next.layer, next.indexInLayer, layerSpokes);
         shuffleInPlace(nb, rng);
         for (const n of nb) {
-          if (disk[n] === null && !frontier.includes(n)) frontier.push(n);
+          if (
+            !isOccupied(n.layer, n.indexInLayer) &&
+            !frontier.some((f) => f.layer === n.layer && f.indexInLayer === n.indexInLayer)
+          ) {
+            frontier.push(n);
+          }
         }
       }
 
-      // If patch ran out of contiguous neighbors, drop remainder into next iteration's
-      // candidates pool (handled by the outer for-loop picking a fresh seed).
       if (placed < budget) {
-        // Spawn a "ghost" sub-patch with leftover budget — push into queue
+        // Couldn't fit the patch — push the leftover into a new sub-budget.
         budgets.push(budget - placed);
       }
     }
   }
 
-  return disk;
+  return result;
 }
 
-function weightedPick(items: { idx: number; w: number }[], rng: () => number): number {
+function weightedPick<T extends { ref: CellRef; w: number }>(
+  items: T[],
+  rng: () => number
+): CellRef | null {
   let sum = 0;
   for (const it of items) sum += it.w;
-  if (sum <= 0) {
-    // All weights zero — pick uniformly
-    return items[Math.floor(rng() * items.length)].idx;
-  }
+  if (sum <= 0) return items[Math.floor(rng() * items.length)].ref;
   let r = rng() * sum;
   for (const it of items) {
     r -= it.w;
-    if (r <= 0) return it.idx;
+    if (r <= 0) return it.ref;
   }
-  return items[items.length - 1].idx;
+  return items[items.length - 1].ref;
 }
 
 function shuffleInPlace<T>(arr: T[], rng: () => number): void {

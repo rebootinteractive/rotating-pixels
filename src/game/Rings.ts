@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { ColorKey } from '../shared/colors';
 import { COLOR_HEX } from '../shared/colors';
+import { angleToSpokeIndex } from '../shared/diskGeometry';
 import type { Disk } from './Disk';
 import type { RingData } from '../shared/types';
 
@@ -9,8 +10,8 @@ interface Door {
   offsetAngle: number;
   color: ColorKey;
   marker: THREE.Mesh;
-  // Per-spoke timing state — re-keyed when door enters a new spoke
-  currentSpoke: number;
+  // Per-spoke timing state — re-keyed when the door enters a new outer-layer spoke.
+  currentOuterSpoke: number;
   timeInSpoke: number;
   ticksFired: number;
   lidded: boolean;
@@ -19,7 +20,7 @@ interface Door {
 export interface PullEvent {
   color: ColorKey;
   layer: number;
-  spoke: number;
+  indexInLayer: number;
   worldPos: THREE.Vector3;
   mesh: THREE.Mesh;
   /** World direction the pulled ball should move in (door's outward direction). */
@@ -52,10 +53,8 @@ export class Ring {
       metalness: 0.25,
     });
     this.torusMesh = new THREE.Mesh(this.torusGeometry, this.torusMaterial);
-    // TorusGeometry default lies in XY plane already, perfect.
     this.group.add(this.torusMesh);
 
-    // Doors as colored beads sitting on the ring, slightly outside.
     this.doorGeometry = new THREE.SphereGeometry(this.thickness * 1.65, 14, 10);
     this.doors = doorData.map((d) => {
       const offset = THREE.MathUtils.degToRad(d.angleDeg);
@@ -73,7 +72,7 @@ export class Ring {
         offsetAngle: offset,
         color: d.color,
         marker: mesh,
-        currentSpoke: -1,
+        currentOuterSpoke: -1,
         timeInSpoke: 0,
         ticksFired: 0,
         lidded: false,
@@ -81,15 +80,10 @@ export class Ring {
     });
   }
 
-  /** Apply the ring's accumulated angle to its group transform. */
   applyTransform(): void {
     this.group.rotation.z = this.angle;
   }
 
-  /**
-   * Update door extraction logic for `dt` seconds. Emits pull events
-   * for any extractions that occurred this frame.
-   */
   update(
     dt: number,
     disk: Disk,
@@ -97,51 +91,51 @@ export class Ring {
     tickInterval: number,
     out: PullEvent[]
   ): void {
-    const tau = Math.PI * 2;
     for (const door of this.doors) {
-      // World angle of the door = ring.angle + door.offsetAngle
       const worldAngle = this.angle + door.offsetAngle;
-      const spoke = disk.spokeAt(worldAngle);
 
-      if (spoke !== door.currentSpoke) {
-        door.currentSpoke = spoke;
+      // Track door dwell against the OUTER layer's spoke (the visually-meaningful unit).
+      const outerN = disk.spokesAtLayer(0);
+      const outerSpoke = outerN > 0 ? angleToSpokeIndex(worldAngle, outerN) : 0;
+
+      if (outerSpoke !== door.currentOuterSpoke) {
+        door.currentOuterSpoke = outerSpoke;
         door.timeInSpoke = 0;
         door.ticksFired = 0;
         door.lidded = false;
-        // Don't continue — fall through so the FIRST pull on a spoke
-        // fires this same frame. Subsequent layer pulls remain time-gated
-        // by tickInterval below.
+        // Don't continue — fall through so the FIRST pull on this spoke
+        // fires this same frame. Subsequent pulls remain time-gated below.
       }
 
       door.timeInSpoke += dt;
 
-      // Fire as many ticks as fit into the elapsed time window.
       while (!door.lidded) {
         const nextTickAt = firstTickDelay + door.ticksFired * tickInterval;
         if (door.timeInSpoke < nextTickAt) break;
 
-        const layer = disk.outermostInSpoke(spoke);
-        if (layer === -1) {
-          // Column drained — stop ticking.
+        const found = disk.findOutermostAtAngle(worldAngle);
+        if (!found) {
           door.lidded = true;
           break;
         }
 
-        const cellColor = disk.colorAt(layer, spoke);
-        if (cellColor === door.color) {
-          const result = disk.extract(layer, spoke);
+        if (found.color === door.color) {
+          const result = disk.extract(found.layer, found.indexInLayer);
           if (result) {
-            // Spawn the ball at the door's outer position, not the disk cell —
-            // this avoids visually clipping through the ring on the way out.
-            const ejectAngle = worldAngle;
-            const cosA = Math.cos(ejectAngle);
-            const sinA = Math.sin(ejectAngle);
-            const spawnPos = new THREE.Vector3(cosA * (this.radius + this.thickness * 1.4), sinA * (this.radius + this.thickness * 1.4), 0);
+            // Spawn the ball at the door's outer position so it doesn't visually
+            // clip through the ring on its way out.
+            const cosA = Math.cos(worldAngle);
+            const sinA = Math.sin(worldAngle);
+            const spawnPos = new THREE.Vector3(
+              cosA * (this.radius + this.thickness * 1.4),
+              sinA * (this.radius + this.thickness * 1.4),
+              0
+            );
             const ejectDir = new THREE.Vector3(cosA, sinA, 0);
             out.push({
               color: result.color,
-              layer,
-              spoke,
+              layer: found.layer,
+              indexInLayer: found.indexInLayer,
               worldPos: spawnPos,
               mesh: result.mesh,
               ejectDir,
@@ -149,14 +143,11 @@ export class Ring {
           }
           door.ticksFired++;
         } else {
-          // Lid! Different-color pixel blocks further pulls in this dwell.
+          // Lid: outermost-non-empty was a different color. Stop until door moves.
           door.lidded = true;
           break;
         }
       }
-
-      // Keep door world angle within [0, 2π) is unnecessary — math wraps fine.
-      void tau;
     }
   }
 
@@ -172,8 +163,7 @@ export class Ring {
 }
 
 /**
- * Manages all rings for a level + the input mapping for picking and rotating
- * a ring. Pointer geometry is in disk-local XY plane (z=0 worldspace).
+ * Manages all rings for a level + ring-picking by world-plane radius.
  */
 export class RingsManager {
   readonly group = new THREE.Group();
@@ -188,7 +178,6 @@ export class RingsManager {
     for (const r of this.rings) this.group.add(r.group);
   }
 
-  /** Pick a ring by world-plane radius. Returns null if no ring within tolerance. */
   pickByRadius(radius: number): Ring | null {
     const tolerance = 0.6;
     let best: Ring | null = null;

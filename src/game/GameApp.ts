@@ -71,7 +71,7 @@ export class GameApp {
     this.scene.add(rim);
 
     // Build disk
-    this.disk = new Disk(this.level.spokes, this.level.layers, this.level.disk);
+    this.disk = new Disk(this.level.outerSpokes, this.level.layers, this.level.disk);
     this.scene.add(this.disk.group);
 
     // Build rings

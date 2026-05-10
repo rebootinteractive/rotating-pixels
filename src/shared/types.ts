@@ -3,11 +3,13 @@ import type { ColorKey } from './colors';
 /**
  * Disk model
  * ----------
- * The disk is a polar grid: `layers` radial layers × `spokes` angular slots.
- * Layer 0 is the outermost layer; layer `layers-1` is the innermost.
- * Disk content is a flat array of length `layers * spokes`, indexed
- * `i = layer * spokes + spoke`. `null` means the slot is empty (pixel pulled
- * or never placed).
+ * The disk is a stack of concentric layers. Layer 0 is outermost. Each layer
+ * has its own spoke count, derived from `outerSpokes` (the spoke count of
+ * the outermost layer). Inner layers have fewer slots so spheres of fixed
+ * size pack tightly without radial gaps.
+ *
+ * `disk` is an array of layers; `disk[layer]` is an array of length
+ * `spokesPerLayer(outerSpokes, layer)`. `null` = empty cell.
  */
 export interface DoorData {
   /** Angle in degrees, 0 = +X axis, CCW positive. */
@@ -41,11 +43,12 @@ export interface LevelData {
   id: string;
   name: string;
 
-  // Disk geometry
-  spokes: number;
+  /** Spoke count of the outermost layer. Inner layers are auto-computed. */
+  outerSpokes: number;
+  /** Number of layers (radial depth). Layer 0 is outermost. */
   layers: number;
-  /** Length = spokes * layers. `null` = empty cell. */
-  disk: (ColorKey | null)[];
+  /** Per-layer cells. disk[layer][spokeIndex]. `null` = empty. */
+  disk: (ColorKey | null)[][];
 
   // Player-controlled rings (index 0 = innermost ring, nearest the disk)
   rings: RingData[];
@@ -60,7 +63,7 @@ export interface LevelData {
   editorParams?: EditorParams;
 }
 
-export const LEVEL_SCHEMA_VERSION = 1;
+export const LEVEL_SCHEMA_VERSION = 2;
 
 /** Each container holds exactly this many balls before being destroyed. */
 export const CONTAINER_SLOTS = 3;

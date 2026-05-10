@@ -11,6 +11,7 @@ import type {
 } from '../shared/types';
 import { CONTAINER_SLOTS } from '../shared/types';
 import { generateDisk, totalPixelsFromParams } from '../shared/diskGen';
+import { maxLayersFor, spokesPerLayer, totalCellsFor } from '../shared/diskGeometry';
 import { Disk } from '../game/Disk';
 import { RingsManager } from '../game/Rings';
 import { saveCustomLevel } from '../ui/storage';
@@ -22,18 +23,18 @@ export interface EditorCallbacks {
 }
 
 const DEFAULTS = {
-  spokes: 14,
-  layers: 4,
+  outerSpokes: 18,
+  layers: 3,
   floorCapacity: 12,
 };
 
 interface EditorState {
   id: string;
   name: string;
-  spokes: number;
+  outerSpokes: number;
   layers: number;
   floorCapacity: number;
-  disk: (ColorKey | null)[];
+  disk: (ColorKey | null)[][];
   rings: RingData[];
   queue: ContainerData[];
   params: EditorParams;
@@ -139,10 +140,10 @@ export class EditorApp {
       return {
         id: initial.id,
         name: initial.name,
-        spokes: initial.spokes,
+        outerSpokes: initial.outerSpokes,
         layers: initial.layers,
         floorCapacity: initial.floorCapacity,
-        disk: initial.disk.slice(),
+        disk: initial.disk.map((row) => row.slice()),
         rings: initial.rings.map((r) => ({ doors: r.doors.map((d) => ({ ...d })) })),
         queue: initial.queue.map((c) => ({ ...c })),
         params,
@@ -158,11 +159,11 @@ export class EditorApp {
         blue: { containers: 2, clumpiness: 0.7, depthBias: 'inner' },
       },
     };
-    const disk = generateDisk(DEFAULTS.spokes, DEFAULTS.layers, params);
+    const disk = generateDisk(DEFAULTS.outerSpokes, DEFAULTS.layers, params);
     return {
       id: `custom-${Date.now()}`,
       name: 'Untitled Level',
-      spokes: DEFAULTS.spokes,
+      outerSpokes: DEFAULTS.outerSpokes,
       layers: DEFAULTS.layers,
       floorCapacity: DEFAULTS.floorCapacity,
       disk,
@@ -179,8 +180,8 @@ export class EditorApp {
   private deriveParamsFromLevel(level: LevelData): EditorParams {
     // For built-in/imported levels without saved params, seed from disk counts.
     const counts = new Map<ColorKey, number>();
-    for (const c of level.disk) {
-      if (c) counts.set(c, (counts.get(c) ?? 0) + 1);
+    for (const row of level.disk) {
+      for (const c of row) if (c) counts.set(c, (counts.get(c) ?? 0) + 1);
     }
     const perColor: EditorParams['perColor'] = {};
     for (const [c, n] of counts) {
@@ -201,7 +202,7 @@ export class EditorApp {
       this.disk.dispose();
       this.disk = null;
     }
-    this.disk = new Disk(this.state.spokes, this.state.layers, this.state.disk);
+    this.disk = new Disk(this.state.outerSpokes, this.state.layers, this.state.disk);
     this.scene.add(this.disk.group);
 
     // Rings
@@ -380,11 +381,14 @@ export class EditorApp {
     shapeRow.style.gap = '8px';
     shapeRow.style.flexWrap = 'wrap';
 
-    shapeRow.appendChild(this.numberField('Spokes', this.state.spokes, 4, 28, (v) => {
-      this.state.spokes = v;
+    const maxLayers = maxLayersFor(this.state.outerSpokes);
+    shapeRow.appendChild(this.numberField('Outer spokes', this.state.outerSpokes, 6, 36, (v) => {
+      this.state.outerSpokes = v;
+      const lim = maxLayersFor(v);
+      if (this.state.layers > lim) this.state.layers = lim;
       this.regenerateDisk();
     }));
-    shapeRow.appendChild(this.numberField('Layers', this.state.layers, 1, 8, (v) => {
+    shapeRow.appendChild(this.numberField('Layers', this.state.layers, 1, Math.max(1, maxLayers), (v) => {
       this.state.layers = v;
       this.regenerateDisk();
     }));
@@ -393,8 +397,18 @@ export class EditorApp {
     }));
     this.panelEl.appendChild(shapeRow);
 
+    // Per-layer breakdown
+    const breakdownPieces: string[] = [];
+    for (let L = 0; L < this.state.layers; L++) breakdownPieces.push(`L${L}: ${spokesPerLayer(this.state.outerSpokes, L)}`);
+    const breakdown = document.createElement('div');
+    breakdown.style.fontSize = '11px';
+    breakdown.style.color = '#8b91a6';
+    breakdown.style.padding = '2px 0 4px';
+    breakdown.textContent = `Spokes per layer (outer→inner): ${breakdownPieces.join(', ')}`;
+    this.panelEl.appendChild(breakdown);
+
     // Capacity check
-    const capacity = this.state.spokes * this.state.layers;
+    const capacity = totalCellsFor(this.state.outerSpokes, this.state.layers);
     const total = totalPixelsFromParams(this.state.params);
     const note = document.createElement('div');
     note.style.fontSize = '11px';
@@ -770,14 +784,14 @@ export class EditorApp {
   }
 
   private regenerateDisk(): void {
-    const cap = this.state.spokes * this.state.layers;
+    const cap = totalCellsFor(this.state.outerSpokes, this.state.layers);
     const total = totalPixelsFromParams(this.state.params);
     if (total > cap) {
       // Don't regenerate — show error in panel notes.
       this.flashStatus('Pixel count exceeds disk capacity. Reduce containers or add layers.');
       return;
     }
-    this.state.disk = generateDisk(this.state.spokes, this.state.layers, this.state.params);
+    this.state.disk = generateDisk(this.state.outerSpokes, this.state.layers, this.state.params);
     this.rebuildScene();
   }
 
@@ -787,37 +801,40 @@ export class EditorApp {
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
-    // Intersect against disk pixels only.
     const intersects = this.raycaster.intersectObjects(this.disk.group.children, false);
     if (intersects.length === 0) return;
     const m = intersects[0].object as THREE.Mesh;
     const layer = m.userData.layer as number | undefined;
-    const spoke = m.userData.spoke as number | undefined;
-    if (layer === undefined || spoke === undefined) return;
-    this.swapPixel(layer, spoke);
+    const indexInLayer = m.userData.indexInLayer as number | undefined;
+    if (layer === undefined || indexInLayer === undefined) return;
+    this.swapPixel(layer, indexInLayer);
   };
 
   /** Swap clicked pixel's color with another randomly-chosen pixel of activeColor. */
-  private swapPixel(layer: number, spoke: number): void {
+  private swapPixel(layer: number, indexInLayer: number): void {
     const target = this.state.activeColor;
-    const idx = layer * this.state.spokes + spoke;
-    const current = this.state.disk[idx];
+    const current = this.state.disk[layer]?.[indexInLayer];
     if (!current || current === target) {
       this.flashStatus(`Already ${target}.`);
       return;
     }
     // Find any other cell currently of target color and swap.
-    const candidates: number[] = [];
-    for (let i = 0; i < this.state.disk.length; i++) {
-      if (this.state.disk[i] === target && i !== idx) candidates.push(i);
+    const candidates: { l: number; i: number }[] = [];
+    for (let L = 0; L < this.state.disk.length; L++) {
+      const row = this.state.disk[L];
+      for (let i = 0; i < row.length; i++) {
+        if (row[i] === target && !(L === layer && i === indexInLayer)) {
+          candidates.push({ l: L, i });
+        }
+      }
     }
     if (candidates.length === 0) {
       this.flashStatus(`No ${target} pixels to swap with.`);
       return;
     }
-    const swapIdx = candidates[Math.floor(Math.random() * candidates.length)];
-    this.state.disk[idx] = target;
-    this.state.disk[swapIdx] = current;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    this.state.disk[layer][indexInLayer] = target;
+    this.state.disk[pick.l][pick.i] = current;
     this.rebuildScene();
     this.flashStatus(`Swapped → ${target}.`);
   }
@@ -838,9 +855,9 @@ export class EditorApp {
     return {
       id: this.state.id,
       name: this.state.name,
-      spokes: this.state.spokes,
+      outerSpokes: this.state.outerSpokes,
       layers: this.state.layers,
-      disk: this.state.disk.slice(),
+      disk: this.state.disk.map((row) => row.slice()),
       rings: this.state.rings.map((r) => ({ doors: r.doors.map((d) => ({ ...d })) })),
       queue: this.state.queue.map((c) => ({ ...c })),
       floorCapacity: this.state.floorCapacity,
@@ -858,7 +875,8 @@ export class EditorApp {
   }
 
   private validateForPlay(lv: LevelData): boolean {
-    if (lv.disk.every((c) => c === null)) {
+    const diskCells = lv.disk.flat();
+    if (diskCells.every((c) => c === null)) {
       this.flashStatus('Disk is empty.');
       return false;
     }
@@ -872,7 +890,7 @@ export class EditorApp {
     }
     // Zero-sum check
     const diskCounts = new Map<ColorKey, number>();
-    for (const c of lv.disk) if (c) diskCounts.set(c, (diskCounts.get(c) ?? 0) + 1);
+    for (const c of diskCells) if (c) diskCounts.set(c, (diskCounts.get(c) ?? 0) + 1);
     const queueCounts = new Map<ColorKey, number>();
     for (const c of lv.queue) queueCounts.set(c.color, (queueCounts.get(c.color) ?? 0) + 1);
     for (const [c, n] of diskCounts) {
